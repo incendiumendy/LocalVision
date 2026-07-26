@@ -1,0 +1,21 @@
+[Unit]
+Description=Standalone local vision LLM configuration and capability tester
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=LOCAL_VISION_USER
+WorkingDirectory=LOCAL_VISION_PROJECT_DIR
+Environment=PYTHONPATH=LOCAL_VISION_PROJECT_DIR/src
+ExecStart=/usr/bin/python3 -m local_vision.server --host 0.0.0.0 --port 7127
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=LOCAL_VISION_HOME/.config/local-vision-console
+
+[Install]
+WantedBy=multi-user.target

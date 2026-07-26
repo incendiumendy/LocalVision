@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lokale KI · Vision Check</title>
+    <link rel="stylesheet" href="styles.css?v=4" />
+  </head>
+  <body>
+    <main>
+      <header class="topbar">
+        <button id="back" class="ghost" type="button">← Klipper</button>
+        <span class="brand"><i></i> LOCAL VISION</span>
+        <span id="service-status" class="status neutral">Bereit</span>
+      </header>
+
+      <section class="hero">
+        <p class="eyebrow">Eigenständiges Werkzeug</p>
+        <h1>Lokale KI verbinden und Vision wirklich prüfen.</h1>
+        <p>
+          Diese Seite ist von AutoPA, Klipper und Moonraker getrennt. Sie sendet
+          keine Druckerbefehle und testet ausschließlich deinen lokalen
+          OpenAI-kompatiblen KI-Server.
+        </p>
+      </section>
+
+      <div class="grid">
+        <section class="panel">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Verbindung</p>
+              <h2>Server & Modell</h2>
+            </div>
+            <span id="key-state" class="mini-status">Kein API-Key</span>
+          </div>
+
+          <label>
+            Server-URL
+            <input id="base-url" type="url"
+              placeholder="http://192.168.1.111:1234/v1" />
+            <small>Nur lokale/private HTTP(S)-Adressen werden akzeptiert.</small>
+          </label>
+
+          <label>
+            Modell
+            <div class="input-action">
+              <input id="model" list="models" placeholder="z. B. qwen2-vl-7b-instruct" />
+              <button id="load-models" class="secondary" type="button">Modelle laden</button>
+            </div>
+            <datalist id="models"></datalist>
+          </label>
+
+          <label>
+            API-Key <span class="optional">optional</span>
+            <input id="api-key" type="password" autocomplete="new-password"
+              placeholder="Unverändert lassen, wenn bereits gespeichert" />
+          </label>
+
+          <label>
+            Zeitlimit
+            <div class="number-field">
+              <input id="timeout" type="number" min="5" max="180" value="45" />
+              <span>Sekunden</span>
+            </div>
+          </label>
+
+          <label class="check">
+            <input id="clear-key" type="checkbox" />
+            Gespeicherten API-Key entfernen
+          </label>
+
+          <button id="save" class="primary" type="button">
+            Konfiguration speichern
+          </button>
+          <p id="config-result" class="message" aria-live="polite"></p>
+        </section>
+
+        <section class="panel">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Fähigkeitstest</p>
+              <h2>Text oder echtes Bild?</h2>
+            </div>
+          </div>
+
+          <article class="test-card">
+            <span class="test-icon">T</span>
+            <div>
+              <h3>Text-Verbindung</h3>
+              <p>Prüft Erreichbarkeit, Modellname und Chat-Endpunkt.</p>
+            </div>
+            <button id="test-text" class="secondary" type="button">Text testen</button>
+          </article>
+
+          <article class="test-card vision">
+            <span class="test-icon">◉</span>
+            <div>
+              <h3>Vision-Nachweis</h3>
+              <p>
+                Erzeugt bei jedem Test ein neues zweifarbiges Bild. Nur wenn das
+                Modell beide zufälligen Farben korrekt erkennt, gilt Vision als
+                bestätigt.
+              </p>
+            </div>
+            <button id="test-vision" class="primary" type="button">Vision testen</button>
+          </article>
+
+          <div id="test-result" class="result neutral" aria-live="polite">
+            <strong>Noch nicht getestet</strong>
+            <p>Speichere zuerst die Verbindung und starte dann einen Test.</p>
+          </div>
+
+          <div class="safety">
+            <strong>Bewusst getrennt</strong>
+            <p>
+              Ein erfolgreicher Test aktiviert keine Kameraüberwachung und
+              keine Druckeraktion. Diese Freigaben bleiben separate Schritte.
+            </p>
+          </div>
+        </section>
+
+        <section class="panel reference-panel">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Optionaler Soll-/Ist-Vergleich</p>
+              <h2>Kamera gegen aktuellen G-Code</h2>
+            </div>
+            <span class="mini-status">Keine Druckerbefehle</span>
+          </div>
+
+          <p class="analysis-intro">
+            Die Console liest den aktuell geladenen G-Code über Moonraker,
+            rendert die erwartete Schicht als Draufsicht und gibt Kamerabild
+            plus Referenz an das Vision-Modell. Das hilft bei abgelösten
+            Teilen, Layer-Shift, fehlenden Konturen und Spaghetti.
+          </p>
+
+          <div class="reference-settings">
+            <label>
+              Moonraker-URL
+              <input id="moonraker-url" type="url"
+                placeholder="http://127.0.0.1:7125" />
+            </label>
+            <label>
+              Kameraquelle
+              <div class="input-action">
+                <select id="camera">
+                  <option value="">
+                    Automatisch · aktive Moonraker-Kamera
+                  </option>
+                </select>
+                <button id="load-cameras" class="secondary" type="button">
+                  Laden
+                </button>
+              </div>
+            </label>
+            <label>
+              Kamerablick
+              <select id="camera-view">
+                <option value="unknown">Noch unbekannt</option>
+                <option value="front">Vorne</option>
+                <option value="rear">Hinten</option>
+                <option value="left">Links</option>
+                <option value="right">Rechts</option>
+                <option value="front-left">Vorne links</option>
+                <option value="front-right">Vorne rechts</option>
+                <option value="rear-left">Hinten links</option>
+                <option value="rear-right">Hinten rechts</option>
+                <option value="top">Draufsicht</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="reference-actions">
+            <button id="detect-view" class="secondary" type="button">
+              Kamerablick vorschlagen
+            </button>
+            <button id="compare-gcode" class="primary" type="button">
+              Aktuellen Druck vergleichen
+            </button>
+          </div>
+
+          <div id="reference-result" class="analysis-result" aria-live="polite">
+            <strong>Noch kein Vergleich</strong>
+            <p>
+              Der erkannte Kamerablick wird nur vorgeschlagen. Erst Speichern
+              übernimmt ihn. Für millimetergenaue Überlagerungen ist später
+              zusätzlich eine Vierpunkt-Kalibrierung der sichtbaren
+              Druckbett-Ecken nötig.
+            </p>
+          </div>
+        </section>
+
+        <section class="panel analysis-panel">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Nach dem Druck · optional</p>
+              <h2>AutoPA-Ergebnisse erklären lassen</h2>
+            </div>
+            <span class="mini-status">Nur lesend</span>
+          </div>
+
+          <p class="analysis-intro">
+            Die lokale KI erhält keine Millionen Rohwerte, sondern nur die
+            kompakten, zuvor deterministisch berechneten Ergebnisdateien. So
+            kann sie Zusammenhänge erklären und den nächsten Test vorschlagen,
+            ohne Messregeln zu ersetzen.
+          </p>
+
+          <div class="analysis-controls">
+            <label>
+              Abgeschlossener Datensatz
+              <select id="dataset">
+                <option value="">Datensätze laden …</option>
+              </select>
+            </label>
+            <button id="load-datasets" class="secondary" type="button">
+              Aktualisieren
+            </button>
+            <button id="analyze" class="primary" type="button">
+              Nach Druck bewerten
+            </button>
+          </div>
+
+          <div id="analysis-result" class="analysis-result" aria-live="polite">
+            <strong>Noch keine KI-Bewertung</strong>
+            <p>
+              Die Ausgabe bleibt eine Empfehlung. PA, Temperatur und
+              Druckerzustand werden nicht automatisch verändert.
+            </p>
+          </div>
+        </section>
+      </div>
+    </main>
+    <script src="app.js?v=4" defer></script>
+  </body>
+</html>
