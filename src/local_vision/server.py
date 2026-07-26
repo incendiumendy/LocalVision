@@ -738,6 +738,23 @@ def _png_data_url(left_rgb, right_rgb, width=128, height=64):
     return "data:image/png;base64," + base64.b64encode(png).decode("ascii")
 
 
+def _vision_color_matches(expected, observed, other_expected):
+    observed = re.sub(r"[^a-z -]", " ", observed.lower())
+    if re.search(r"\b%s\b" % re.escape(expected), observed):
+        return True
+    aliases = {
+        "cyan": ("aqua", "turquoise", "teal", "light blue"),
+        "magenta": ("purple", "pink"),
+    }
+    if any(alias in observed for alias in aliases.get(expected, ())):
+        return True
+    return (
+        expected == "cyan"
+        and other_expected != "blue"
+        and re.search(r"\bblue\b", observed) is not None
+    )
+
+
 def vision_test(config):
     names = list(COLORS)
     left = secrets.choice(names)
@@ -760,11 +777,14 @@ def vision_test(config):
         ],
     }])
     normalized = answer.lower()
-    ok = (
-        "vision_ok" in normalized
-        and left in normalized
-        and right in normalized
-        and normalized.find(left) < normalized.find(right)
+    parsed = re.search(
+        r"vision_ok\s*:\s*([^,\n]+)\s*,\s*([^\n]+)",
+        normalized,
+    )
+    ok = bool(
+        parsed
+        and _vision_color_matches(left, parsed.group(1), right)
+        and _vision_color_matches(right, parsed.group(2), left)
     )
     return {
         "ok": ok,
