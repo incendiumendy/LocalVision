@@ -1,6 +1,6 @@
 # Local Vision für Klipper
 
-[English](README.md) | [Deutsch](README.de.md)
+[English](README.md) | [Deutsch](README.de.md) | [Änderungsprotokoll](CHANGELOG.md)
 
 Local Vision ist ein unabhängiges, lokal betriebenes Vision- und
 Analysewerkzeug für Klipper-/Moonraker-Drucker. Es ist bewusst von AutoPA
