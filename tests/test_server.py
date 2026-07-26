@@ -12,6 +12,7 @@ from local_vision.server import (
     ConfigStore,
     DatasetReader,
     _png_data_url,
+    _vision_color_matches,
     make_handler,
     openai_url,
     parse_gcode_layers,
@@ -60,6 +61,13 @@ class LocalVisionConsoleTests(unittest.TestCase):
     def test_generated_vision_probe_is_png(self):
         value = _png_data_url((255, 0, 0), (0, 0, 255))
         self.assertTrue(value.startswith("data:image/png;base64,"))
+
+    def test_common_vision_color_synonyms_are_accepted_safely(self):
+        self.assertTrue(_vision_color_matches("cyan", "blue", "green"))
+        self.assertTrue(_vision_color_matches("cyan", "turquoise", "red"))
+        self.assertTrue(_vision_color_matches("magenta", "purple", "yellow"))
+        self.assertFalse(_vision_color_matches("cyan", "blue", "blue"))
+        self.assertFalse(_vision_color_matches("green", "blue", "red"))
 
     def test_gcode_layer_is_rendered_as_reference_image(self):
         layers = parse_gcode_layers(
