@@ -1,7 +1,8 @@
 """Standalone web UI for configuring and testing a local vision LLM.
 
-This service deliberately has no dependency on AutoPA, Klipper, Moonraker, or
-printer control. It only talks to an OpenAI-compatible API on the local network.
+Most features are read-only. The guided camera calibration is the sole web
+workflow permitted to home and move the toolhead, and requires explicit
+per-run confirmation plus live Klipper safety checks.
 """
 
 import argparse
@@ -14,6 +15,7 @@ import re
 import secrets
 import socket
 import struct
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -21,6 +23,19 @@ import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote, urljoin, urlparse
+
+from .calibration import (
+    CalibrationError,
+    build_calibration_plan,
+    project_point,
+    solve_homography,
+    validate_center_point,
+)
+from .notifications import (
+    NotificationConfigurationError,
+    send_home_assistant_webhook,
+    validate_home_assistant_webhook_url,
+)
 
 
 DEFAULT_CONFIG = {
@@ -31,6 +46,10 @@ DEFAULT_CONFIG = {
     "moonraker_url": "http://127.0.0.1:7125",
     "camera_uid": "",
     "camera_view": "unknown",
+    "camera_calibration": None,
+    "home_assistant_webhook_url": "",
+    "home_assistant_enabled": False,
+    "home_assistant_cooldown_minutes": 15,
 }
 MAX_BODY_BYTES = 64 * 1024
 COLORS = {
@@ -130,6 +149,23 @@ class ConfigStore:
             "moonrakerUrl": config["moonraker_url"],
             "cameraUid": config["camera_uid"],
             "cameraView": config["camera_view"],
+            "cameraCalibrationConfigured": bool(
+                config["camera_calibration"]),
+            "cameraCalibration": (
+                {
+                    "createdUtc": config["camera_calibration"].get(
+                        "created_utc"),
+                    "reprojectionError": config["camera_calibration"].get(
+                        "reprojection_error"),
+                    "camera": config["camera_calibration"].get("camera"),
+                }
+                if isinstance(config["camera_calibration"], dict)
+                else None),
+            "homeAssistantWebhookConfigured": bool(
+                config["home_assistant_webhook_url"]),
+            "homeAssistantEnabled": bool(config["home_assistant_enabled"]),
+            "homeAssistantCooldownMinutes": int(
+                config["home_assistant_cooldown_minutes"]),
         }
 
     def save(self, payload):
@@ -158,6 +194,31 @@ class ConfigStore:
         }
         if camera_view not in allowed_views:
             raise ConfigurationError("Unbekannter Kamerawinkel.")
+        webhook_url = current["home_assistant_webhook_url"]
+        if payload.get("clearHomeAssistantWebhook"):
+            webhook_url = ""
+        elif payload.get("homeAssistantWebhookUrl"):
+            try:
+                webhook_url = validate_home_assistant_webhook_url(
+                    payload["homeAssistantWebhookUrl"])
+            except NotificationConfigurationError as exc:
+                raise ConfigurationError(str(exc)) from exc
+        home_assistant_enabled = bool(
+            payload.get(
+                "homeAssistantEnabled",
+                current["home_assistant_enabled"]))
+        if payload.get("clearHomeAssistantWebhook"):
+            home_assistant_enabled = False
+        if home_assistant_enabled and not webhook_url:
+            raise ConfigurationError(
+                "Für den Home-Assistant-Alarm muss zuerst eine Webhook-URL "
+                "gespeichert werden.")
+        cooldown_minutes = int(payload.get(
+            "homeAssistantCooldownMinutes",
+            current["home_assistant_cooldown_minutes"]))
+        if not 1 <= cooldown_minutes <= 1440:
+            raise ConfigurationError(
+                "Die Alarm-Sperrzeit muss zwischen 1 und 1440 Minuten liegen.")
         config = {
             "base_url": base_url,
             "model": model,
@@ -166,7 +227,22 @@ class ConfigStore:
             "moonraker_url": moonraker_url,
             "camera_uid": camera_uid,
             "camera_view": camera_view,
+            "camera_calibration": current["camera_calibration"],
+            "home_assistant_webhook_url": webhook_url,
+            "home_assistant_enabled": home_assistant_enabled,
+            "home_assistant_cooldown_minutes": cooldown_minutes,
         }
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps(config, indent=2) + "\n", encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        temporary.replace(self.path)
+        return self.public()
+
+    def save_camera_calibration(self, calibration):
+        config = self.load()
+        config["camera_calibration"] = calibration
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(".tmp")
         temporary.write_text(
@@ -238,6 +314,79 @@ def _moonraker_json(config, path):
     return payload.get("result", payload) if isinstance(payload, dict) else payload
 
 
+def _moonraker_command(config, script, timeout=300):
+    base = validate_base_url(config["moonraker_url"])
+    request_config = dict(config)
+    request_config["api_key"] = ""
+    request_config["timeout_seconds"] = max(5, int(timeout))
+    try:
+        payload = _json_request(
+            base + "/printer/gcode/script",
+            request_config,
+            method="POST",
+            payload={"script": script})
+    except RuntimeError as exc:
+        raise RuntimeError(
+            str(exc).replace("KI-Server", "Moonraker")) from exc
+    return payload.get("result", payload) if isinstance(payload, dict) else payload
+
+
+def _klipper_respond_available(config):
+    """Return whether Klipper loaded the optional [respond] module."""
+    try:
+        result = _moonraker_json(
+            config, "/printer/objects/query?configfile")
+    except (ConfigurationError, RuntimeError):
+        return False
+    settings = result.get("status", result).get(
+        "configfile", {}).get("settings", {})
+    return isinstance(settings, dict) and "respond" in settings
+
+
+def _calibration_console_message(config, message, respond_enabled):
+    """Log calibration progress locally and, when available, in Mainsail."""
+    clean = re.sub(r"\s+", " ", str(message)).strip()
+    clean = clean.replace('"', "'")[:220]
+    print("Local Vision: %s" % clean, flush=True)
+    if not respond_enabled:
+        return
+    try:
+        _moonraker_command(
+            config,
+            'RESPOND TYPE=echo MSG="Local Vision: %s"' % clean,
+            timeout=15)
+    except (ConfigurationError, RuntimeError) as exc:
+        print(
+            "Local Vision: Mainsail console message failed: %s" % exc,
+            flush=True)
+
+
+def _live_motion_state(config):
+    result = _moonraker_json(
+        config,
+        "/printer/objects/query?toolhead&print_stats&webhooks")
+    return result.get("status", result)
+
+
+def _require_idle_printer(config):
+    state = _live_motion_state(config)
+    webhooks = state.get("webhooks", {})
+    print_stats = state.get("print_stats", {})
+    if webhooks.get("state") != "ready":
+        raise ConfigurationError("Klipper ist nicht bereit.")
+    if print_stats.get("state") not in {"standby", "complete", "cancelled"}:
+        raise ConfigurationError(
+            "Die Kamerakalibrierung ist nur im Leerlauf erlaubt.")
+    toolhead = state.get("toolhead", {})
+    try:
+        plan = build_calibration_plan(
+            list(toolhead.get("axis_minimum") or []),
+            list(toolhead.get("axis_maximum") or []))
+    except CalibrationError as exc:
+        raise ConfigurationError(str(exc)) from exc
+    return state, plan
+
+
 def _web_root(moonraker_url):
     parsed = urlparse(moonraker_url)
     hostname = parsed.hostname
@@ -298,6 +447,39 @@ def camera_snapshot(config):
     return camera, image, content_type
 
 
+def image_dimensions(image, content_type):
+    if content_type == "image/png" and image.startswith(b"\x89PNG\r\n\x1a\n"):
+        if len(image) < 24:
+            raise RuntimeError("Das PNG-Kamerabild ist unvollständig.")
+        return struct.unpack(">II", image[16:24])
+    if content_type == "image/jpeg" and image.startswith(b"\xff\xd8"):
+        offset = 2
+        while offset + 9 <= len(image):
+            if image[offset] != 0xff:
+                offset += 1
+                continue
+            marker = image[offset + 1]
+            offset += 2
+            if marker in {0xd8, 0xd9} or 0xd0 <= marker <= 0xd7:
+                continue
+            if offset + 2 > len(image):
+                break
+            length = struct.unpack(">H", image[offset:offset + 2])[0]
+            if length < 2 or offset + length > len(image):
+                break
+            if marker in {
+                    0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7,
+                    0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf}:
+                if length < 7:
+                    break
+                height, width = struct.unpack(
+                    ">HH", image[offset + 3:offset + 7])
+                return width, height
+            offset += length
+    raise RuntimeError(
+        "Die Größe des Kamerabilds konnte nicht bestimmt werden.")
+
+
 def _data_url(content, content_type):
     return "data:%s;base64,%s" % (
         content_type, base64.b64encode(content).decode("ascii"))
@@ -315,6 +497,66 @@ def _parse_json_answer(answer):
     if not isinstance(payload, dict):
         raise RuntimeError("Die Winkelantwort ist kein JSON-Objekt.")
     return payload
+
+
+def locate_moved_toolhead(
+        config, before_image, before_type, after_image, after_type):
+    """Locate the moved nozzle/toolhead in the second of two camera frames."""
+    answer, latency = _chat(config, [{
+        "role": "user",
+        "content": [
+            {
+                "type": "text",
+                "text": (
+                    "Zwischen Bild 1 und Bild 2 wurde ausschließlich der "
+                    "Druckkopf eines stillstehenden 3D-Druckers bewegt. "
+                    "Bestimme in Bild 2 möglichst die Position der Düsenspitze, "
+                    "sonst den geometrischen Mittelpunkt des Druckkopfs. "
+                    "Antworte ausschließlich als JSON mit x und y als "
+                    "normierte Bildkoordinaten von 0 bis 1 (Ursprung links "
+                    "oben), confidence von 0 bis 1, visible als Boolean und "
+                    "target entweder nozzle oder toolhead. Bei Unsicherheit "
+                    "visible=false. Keine Erklärung."),
+            },
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": _data_url(before_image, before_type),
+                },
+            },
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": _data_url(after_image, after_type),
+                },
+            },
+        ],
+    }], max_tokens=120)
+    result = _parse_json_answer(answer)
+    try:
+        x_pos = float(result.get("x"))
+        y_pos = float(result.get("y"))
+        confidence = float(result.get("confidence"))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "Das Vision-Modell lieferte ungültige Bildkoordinaten.") from exc
+    if (
+            result.get("visible") is not True
+            or not 0.0 <= x_pos <= 1.0
+            or not 0.0 <= y_pos <= 1.0
+            or not 0.0 <= confidence <= 1.0):
+        raise RuntimeError(
+            "Der bewegte Druckkopf wurde im Kamerabild nicht sicher erkannt.")
+    if confidence < 0.65:
+        raise RuntimeError(
+            "Die Druckkopferkennung ist für eine Kalibrierung zu unsicher.")
+    return {
+        "x": x_pos,
+        "y": y_pos,
+        "confidence": confidence,
+        "target": str(result.get("target") or "unknown"),
+        "latencyMs": latency,
+    }
 
 
 def detect_camera_view(config):
@@ -498,8 +740,15 @@ def _rgb_png_data_url(width, height, pixels):
     return _data_url(png, "image/png")
 
 
-def render_layer_reference(groups, target_layer, bed_width, bed_depth):
-    width = height = 512
+def render_layer_reference(
+        groups, target_layer, bed_width, bed_depth,
+        homography=None, image_size=None):
+    if homography and image_size:
+        width, height = [int(value) for value in image_size]
+        if not 64 <= width <= 4096 or not 64 <= height <= 4096:
+            raise RuntimeError("Die Kamerabildgröße ist ungültig.")
+    else:
+        width = height = 512
     pixels = bytearray((9, 12, 17) * (width * height))
     available = sorted(layer for layer, lines in groups.items() if lines)
     if not available:
@@ -512,6 +761,16 @@ def render_layer_reference(groups, target_layer, bed_width, bed_depth):
     margin = 18
 
     def point(x_value, y_value):
+        if homography:
+            try:
+                u_pos, v_pos = project_point(
+                    homography, x_value, y_value)
+            except CalibrationError as exc:
+                raise RuntimeError(str(exc)) from exc
+            return (
+                round(max(0.0, min(1.0, u_pos)) * (width - 1)),
+                round(max(0.0, min(1.0, v_pos)) * (height - 1)),
+            )
         return (
             margin + round(
                 max(0.0, min(bed_width, x_value))
@@ -533,7 +792,7 @@ def render_layer_reference(groups, target_layer, bed_width, bed_depth):
     return _rgb_png_data_url(width, height, pixels), chosen
 
 
-def current_gcode_reference(config):
+def current_gcode_reference(config, homography=None, image_size=None):
     query = (
         "/printer/objects/query?print_stats&virtual_sdcard&toolhead&configfile")
     status_result = _moonraker_json(config, query)
@@ -567,7 +826,8 @@ def current_gcode_reference(config):
         max_bytes=128 * 1024 * 1024)
     groups = parse_gcode_layers(gcode_bytes.decode("utf-8", "replace"))
     reference, rendered_layer = render_layer_reference(
-        groups, int(current_layer), bed_width, bed_depth)
+        groups, int(current_layer), bed_width, bed_depth,
+        homography=homography, image_size=image_size)
     return {
         "filename": filename,
         "printState": print_stats.get("state"),
@@ -580,15 +840,30 @@ def current_gcode_reference(config):
         "slicer": metadata.get("slicer"),
         "layerHeight": metadata.get("layer_height"),
         "referenceImage": reference,
+        "cameraAligned": bool(homography),
     }
 
 
 def compare_current_print(config):
-    reference = current_gcode_reference(config)
     camera, snapshot, snapshot_type = camera_snapshot(config)
+    calibration = config.get("camera_calibration")
+    homography = None
+    image_size = None
+    if (
+            isinstance(calibration, dict)
+            and calibration.get("camera_uid") == camera.get("uid")
+            and calibration.get("homography")):
+        homography = calibration["homography"]
+        image_size = image_dimensions(snapshot, snapshot_type)
+    reference = current_gcode_reference(
+        config, homography=homography, image_size=image_size)
+    reference_description = (
+        "eine auf die Kameraperspektive kalibrierte Projektion"
+        if reference["cameraAligned"]
+        else "eine unkalibrierte Draufsicht")
     prompt = (
         "Vergleiche zwei Bilder eines laufenden FDM-Drucks. Bild 1 ist das "
-        "aktuelle Kamerabild. Bild 2 ist eine Draufsicht der laut G-Code bis "
+        "aktuelle Kamerabild. Bild 2 ist %s der laut G-Code bis "
         "zur aktuellen Schicht erwarteten Extrusionskontur; die aktuelle "
         "Schicht ist türkis, frühere Schichten sind grau. Die Kameraansicht "
         "ist als '%s' hinterlegt. Berücksichtige die unterschiedliche "
@@ -598,7 +873,9 @@ def compare_current_print(config):
         "der erwarteten Form. Antworte auf Deutsch mit Befund, Konfidenz, "
         "möglichen Ursachen und empfohlener menschlicher Prüfung. Keine "
         "Druckerbefehle."
-    ) % config.get("camera_view", "unknown")
+    ) % (
+        reference_description,
+        config.get("camera_view", "unknown"))
     answer, latency = _chat(config, [{
         "role": "user",
         "content": [
@@ -622,6 +899,7 @@ def compare_current_print(config):
         "renderedLayer": reference["renderedLayer"],
         "camera": camera["name"],
         "cameraView": config.get("camera_view", "unknown"),
+        "cameraAligned": reference["cameraAligned"],
         "answer": answer,
         "latencyMs": latency,
         "printerAction": "none",
@@ -799,6 +1077,36 @@ def vision_test(config):
     }
 
 
+def home_assistant_test(config):
+    """Send a harmless test event through the configured HA webhook."""
+    if not config.get("home_assistant_enabled"):
+        raise ConfigurationError(
+            "Der Home-Assistant-Alarm ist noch nicht aktiviert.")
+    event = {
+        "event_type": "test",
+        "source": "local-vision",
+        "severity": "info",
+        "title": "Local Vision Testalarm",
+        "message": (
+            "Die Verbindung zwischen Local Vision und Home Assistant "
+            "funktioniert."),
+        "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    try:
+        delivered = send_home_assistant_webhook(
+            config.get("home_assistant_webhook_url"),
+            event,
+            timeout_seconds=min(
+                int(config.get("timeout_seconds", 45)), 15))
+    except NotificationConfigurationError as exc:
+        raise ConfigurationError(str(exc)) from exc
+    return {
+        "ok": True,
+        "delivered": delivered["delivered"],
+        "status": delivered["status"],
+    }
+
+
 class DatasetReader:
     """Read compact, deterministic AutoPA result files without modifying them."""
 
@@ -898,8 +1206,310 @@ def post_print_analysis(config, dataset):
     }
 
 
-def make_handler(store, static_dir, dataset_reader=None):
+class GuidedCalibrationManager:
+    """Two-step, supervised camera calibration with strict motion gates."""
+
+    SESSION_SECONDS = 10 * 60
+
+    def __init__(self, store):
+        self.store = store
+        self.lock = threading.Lock()
+        self.session = None
+        self.expiry_timer = None
+
+    def _clear_session(self):
+        with self.lock:
+            self.session = None
+            timer = self.expiry_timer
+            self.expiry_timer = None
+        if timer:
+            timer.cancel()
+
+    def _expire(self, token):
+        with self.lock:
+            if not self.session or self.session["token"] != token:
+                return
+            if self.session["state"] == "running":
+                return
+            self.session = None
+            self.expiry_timer = None
+
+    @staticmethod
+    def _public_plan(state, plan):
+        toolhead = state.get("toolhead", {})
+        return {
+            "axisMinimum": plan["axis_minimum"],
+            "axisMaximum": plan["axis_maximum"],
+            "bedWidth": plan["bed_width"],
+            "bedDepth": plan["bed_depth"],
+            "safeZ": plan["safe_z"],
+            "homedAxes": str(toolhead.get("homed_axes") or ""),
+            "points": [
+                {
+                    "name": point["name"],
+                    "x": point["x"],
+                    "y": point["y"],
+                }
+                for point in plan["points"]
+            ],
+        }
+
+    def plan(self):
+        config = self.store.load()
+        state, plan = _require_idle_printer(config)
+        return {
+            "ok": True,
+            "motionRequired": True,
+            "homingRequired": True,
+            "nozzleHeatingRequired": False,
+            "nozzleCleaningRequired": False,
+            "homingCommand": "G28",
+            "plan": self._public_plan(state, plan),
+        }
+
+    def prepare(self, payload):
+        if payload.get("motionConfirmation") != "HOME_AND_MOVE":
+            raise ConfigurationError(
+                "Die Bewegung wurde nicht ausdrücklich bestätigt.")
+        config = self.store.load()
+        if not str(config.get("model") or "").strip():
+            raise ConfigurationError(
+                "Vor der Kamerakalibrierung muss ein Vision-Modell "
+                "konfiguriert werden.")
+        _selected_camera(config)
+        state, plan = _require_idle_printer(config)
+        respond_enabled = _klipper_respond_available(config)
+        token = secrets.token_urlsafe(24)
+        with self.lock:
+            if self.session:
+                raise ConfigurationError(
+                    "Es läuft bereits eine Kamerakalibrierung.")
+            self.session = {
+                "token": token,
+                "state": "ready",
+                "plan": plan,
+                "respond_enabled": respond_enabled,
+                "created_monotonic": time.monotonic(),
+            }
+        with self.lock:
+            self.expiry_timer = threading.Timer(
+                self.SESSION_SECONDS,
+                self._expire,
+                args=(token,))
+            self.expiry_timer.daemon = True
+            self.expiry_timer.start()
+        return {
+            "ok": True,
+            "sessionToken": token,
+            "state": "ready_to_home",
+            "expiresSeconds": self.SESSION_SECONDS,
+            "consoleMessages": respond_enabled,
+            "plan": self._public_plan(state, plan),
+            "message": (
+                "Bereit für normales G28 ohne Heizen und die anschließende "
+                "Messfahrt."),
+        }
+
+    def cancel(self, payload):
+        token = str(payload.get("sessionToken") or "")
+        config = self.store.load()
+        with self.lock:
+            if not self.session or self.session["token"] != token:
+                raise ConfigurationError(
+                    "Keine passende Kalibrierung gefunden.")
+            if self.session["state"] == "running":
+                raise ConfigurationError(
+                    "Die Messfahrt läuft bereits. Bei Gefahr Not-Aus benutzen.")
+        self._clear_session()
+        return {"ok": True, "state": "cancelled"}
+
+    def run(self, payload):
+        token = str(payload.get("sessionToken") or "")
+        if payload.get("motionConfirmation") != "HOME_AND_MOVE":
+            raise ConfigurationError(
+                "Homing und Druckkopfbewegung wurden nicht bestätigt.")
+        with self.lock:
+            if not self.session or self.session["token"] != token:
+                raise ConfigurationError(
+                    "Die Kalibrierung ist abgelaufen oder unbekannt.")
+            if self.session["state"] != "ready":
+                raise ConfigurationError(
+                    "Die Kalibrierung ist nicht bereit für die Messfahrt.")
+            if (
+                    time.monotonic() - self.session["created_monotonic"]
+                    > self.SESSION_SECONDS):
+                raise ConfigurationError("Die Kalibrierung ist abgelaufen.")
+            self.session["state"] = "running"
+            plan = self.session["plan"]
+            respond_enabled = self.session.get("respond_enabled", False)
+            timer = self.expiry_timer
+            self.expiry_timer = None
+        if timer:
+            timer.cancel()
+        config = self.store.load()
+        observations = []
+        success = False
+        try:
+            _require_idle_printer(config)
+            _calibration_console_message(
+                config,
+                "Kamerakalibrierung: Homing wird gestartet "
+                "(G28, ohne Heizen).",
+                respond_enabled)
+            _moonraker_command(config, "G28", timeout=240)
+            state, current_plan = _require_idle_printer(config)
+            homed_axes = str(
+                state.get("toolhead", {}).get("homed_axes") or "")
+            if not all(axis in homed_axes for axis in "xyz"):
+                raise RuntimeError(
+                    "Klipper bestätigt nach G28 nicht alle drei Achsen.")
+            if (
+                    current_plan["axis_minimum"] != plan["axis_minimum"]
+                    or current_plan["axis_maximum"] != plan["axis_maximum"]):
+                raise RuntimeError(
+                    "Die Achsgrenzen haben sich während der Kalibrierung "
+                    "geändert.")
+            center = plan["points"][-1]
+            speed = plan["travel_speed_mm_s"] * 60.0
+            _calibration_console_message(
+                config,
+                "Homing abgeschlossen. Sichere Ausgangsposition "
+                "wird angefahren.",
+                respond_enabled)
+            _moonraker_command(
+                config,
+                (
+                    "G90\n"
+                    "G0 Z%.3f F600\n"
+                    "G0 X%.3f Y%.3f F%.0f\n"
+                    "M400\nG4 P700"
+                ) % (
+                    plan["safe_z"],
+                    center["x"],
+                    center["y"],
+                    speed),
+                timeout=90)
+            camera, before_image, before_type = camera_snapshot(config)
+            for point_number, point in enumerate(plan["points"], start=1):
+                _require_idle_printer(config)
+                _calibration_console_message(
+                    config,
+                    "Messpunkt %d/%d %s wird angefahren: X%.1f Y%.1f."
+                    % (
+                        point_number,
+                        len(plan["points"]),
+                        point["name"],
+                        point["x"],
+                        point["y"]),
+                    respond_enabled)
+                _moonraker_command(
+                    config,
+                    "G90\nG0 X%.3f Y%.3f F%.0f\nM400\nG4 P700" % (
+                        point["x"], point["y"], speed),
+                    timeout=90)
+                _camera, after_image, after_type = camera_snapshot(config)
+                located = locate_moved_toolhead(
+                    config,
+                    before_image,
+                    before_type,
+                    after_image,
+                    after_type)
+                observations.append({
+                    "name": point["name"],
+                    "bed": [point["x"], point["y"]],
+                    "image": [located["x"], located["y"]],
+                    "confidence": located["confidence"],
+                    "target": located["target"],
+                    "latency_ms": located["latencyMs"],
+                })
+                _calibration_console_message(
+                    config,
+                    "Messpunkt %d/%d erkannt, Konfidenz %d Prozent."
+                    % (
+                        point_number,
+                        len(plan["points"]),
+                        round(located["confidence"] * 100)),
+                    respond_enabled)
+                before_image, before_type = after_image, after_type
+            _calibration_console_message(
+                config,
+                "Alle Messpunkte erfasst. Kameraprojektion wird geprüft.",
+                respond_enabled)
+            targets = {item["target"] for item in observations}
+            if len(targets) != 1:
+                raise RuntimeError(
+                    "Das Modell hat Düse und Druckkopf uneinheitlich "
+                    "lokalisiert.")
+            homography = solve_homography(
+                [tuple(item["bed"]) for item in observations[:4]],
+                [tuple(item["image"]) for item in observations[:4]])
+            reprojection_error = validate_center_point(
+                homography,
+                tuple(observations[4]["bed"]),
+                tuple(observations[4]["image"]))
+            if reprojection_error > 0.08:
+                raise RuntimeError(
+                    "Die Kontrollposition weicht zu stark von der "
+                    "Kameraprojektion ab.")
+            calibration = {
+                "created_utc": time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "camera": camera["name"],
+                "camera_uid": camera["uid"],
+                "homography": homography,
+                "reprojection_error": reprojection_error,
+                "minimum_confidence": min(
+                    item["confidence"] for item in observations),
+                "target": next(iter(targets)),
+                "axis_minimum": plan["axis_minimum"],
+                "axis_maximum": plan["axis_maximum"],
+                "safe_z": plan["safe_z"],
+                "points": observations,
+            }
+            self.store.save_camera_calibration(calibration)
+            _calibration_console_message(
+                config,
+                "Kalibrierung gespeichert. Druckkopf fährt zur sicheren "
+                "Mittelposition zurück.",
+                respond_enabled)
+            _moonraker_command(
+                config,
+                "G90\nG0 Z%.3f F600\nG0 X%.3f Y%.3f F%.0f\nM400" % (
+                    plan["safe_z"],
+                    center["x"],
+                    center["y"],
+                    speed),
+                timeout=90)
+            success = True
+            _calibration_console_message(
+                config,
+                "Kamerakalibrierung erfolgreich abgeschlossen.",
+                respond_enabled)
+            return {
+                "ok": True,
+                "state": "calibrated",
+                "camera": camera["name"],
+                "reprojectionError": reprojection_error,
+                "minimumConfidence": calibration["minimum_confidence"],
+                "samples": observations,
+            }
+        except Exception as exc:
+            _calibration_console_message(
+                config,
+                "Kamerakalibrierung abgebrochen: %s" % exc,
+                respond_enabled)
+            raise
+        finally:
+            self._clear_session()
+            if not success:
+                print("Camera calibration aborted without enabling a heater.")
+
+
+def make_handler(
+        store, static_dir, dataset_reader=None, calibration_manager=None):
     static_root = Path(static_dir).resolve()
+    calibration_manager = (
+        calibration_manager or GuidedCalibrationManager(store))
 
     class LocalVisionHandler(BaseHTTPRequestHandler):
         server_version = "LocalVisionConsole/0.1"
@@ -934,7 +1544,7 @@ def make_handler(store, static_dir, dataset_reader=None):
         def _run(self, callback):
             try:
                 self._json(callback())
-            except ConfigurationError as exc:
+            except (ConfigurationError, CalibrationError) as exc:
                 self._json({"ok": False, "error": str(exc)}, 400)
             except RuntimeError as exc:
                 self._json({"ok": False, "error": str(exc)}, 502)
@@ -950,7 +1560,9 @@ def make_handler(store, static_dir, dataset_reader=None):
                 self._json({
                     "ok": True,
                     "service": "local-vision-console",
-                    "printerControl": False,
+                    "printerControl": True,
+                    "printerControlScope": "guided-camera-calibration-only",
+                    "automaticPrintActions": False,
                     "autopaDependency": False,
                 })
                 return
@@ -975,6 +1587,9 @@ def make_handler(store, static_dir, dataset_reader=None):
                     "ok": True,
                     "cameras": available_cameras(store.load()),
                 })
+                return
+            if path == "/api/camera/calibration/plan":
+                self._run(calibration_manager.plan)
                 return
             relative = path.lstrip("/") or "index.html"
             candidate = (static_root / relative).resolve()
@@ -1009,6 +1624,9 @@ def make_handler(store, static_dir, dataset_reader=None):
             if path == "/api/test/vision":
                 self._run(lambda: vision_test(store.load()))
                 return
+            if path == "/api/home-assistant/test":
+                self._run(lambda: home_assistant_test(store.load()))
+                return
             if path == "/api/analyze":
                 def analyze():
                     if not dataset_reader:
@@ -1022,6 +1640,18 @@ def make_handler(store, static_dir, dataset_reader=None):
                 return
             if path == "/api/camera/detect-view":
                 self._run(lambda: detect_camera_view(store.load()))
+                return
+            if path == "/api/camera/calibration/prepare":
+                self._run(lambda: calibration_manager.prepare(
+                    self._request_json()))
+                return
+            if path == "/api/camera/calibration/run":
+                self._run(lambda: calibration_manager.run(
+                    self._request_json()))
+                return
+            if path == "/api/camera/calibration/cancel":
+                self._run(lambda: calibration_manager.cancel(
+                    self._request_json()))
                 return
             if path == "/api/reference/compare":
                 self._run(lambda: compare_current_print(store.load()))

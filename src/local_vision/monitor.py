@@ -12,6 +12,8 @@ import time
 import urllib.parse
 import urllib.request
 
+from .notifications import send_home_assistant_webhook
+
 
 REACTIONS = ("warn", "pause", "cancel-early-pause")
 ACTION_CONFIRMATION = "I_UNDERSTAND"
@@ -98,7 +100,9 @@ def _bytes_request(url, timeout=10):
 class VisionMonitor:
     def __init__(self, moonraker_url, printer_web_url, llm_base_url, model,
                  policy, live_status_path=None, api_token=None,
-                 allow_printer_actions=False, evidence_dir=None):
+                 allow_printer_actions=False, evidence_dir=None,
+                 home_assistant_webhook_url=None,
+                 home_assistant_cooldown_seconds=900):
         self.moonraker_url = moonraker_url.rstrip("/")
         self.printer_web_url = printer_web_url.rstrip("/") + "/"
         self.llm_base_url = llm_base_url.rstrip("/")
@@ -108,8 +112,13 @@ class VisionMonitor:
         self.api_token = api_token
         self.allow_printer_actions = allow_printer_actions
         self.evidence_dir = evidence_dir
+        self.home_assistant_webhook_url = (
+            str(home_assistant_webhook_url or "").strip())
+        self.home_assistant_cooldown_seconds = max(
+            60.0, float(home_assistant_cooldown_seconds))
         self.observations = []
         self.action_issued = False
+        self.last_notification_monotonic = None
 
     def _printer_status(self):
         path = "/printer/objects/query?print_stats&extruder"
@@ -249,6 +258,49 @@ class VisionMonitor:
         self.action_issued = True
         return True
 
+    def _notify_home_assistant(self, event):
+        if not self.home_assistant_webhook_url:
+            return {"status": "disabled"}
+        now = time.monotonic()
+        if (
+                self.last_notification_monotonic is not None
+                and now - self.last_notification_monotonic
+                < self.home_assistant_cooldown_seconds):
+            return {"status": "suppressed", "reason": "cooldown"}
+        observation = event["observation"]
+        telemetry = event["telemetry"]
+        probability = float(
+            observation.get("failure_probability") or 0.0)
+        failure_type = str(
+            observation.get("failure_type") or "unknown")
+        filename = str(telemetry.get("filename") or "Unbekannter Druck")
+        action = event["decision"]["action"]
+        payload = {
+            "event_type": "print_failure",
+            "source": "local-vision",
+            "severity": "critical",
+            "title": "Local Vision: Druckproblem erkannt",
+            "message": (
+                "%s: %s mit %.0f %% Wahrscheinlichkeit. Reaktion: %s."
+                % (filename, failure_type, probability * 100.0, action)),
+            "created_utc": event["created_utc"],
+            "filename": filename,
+            "failure_type": failure_type,
+            "failure_probability": probability,
+            "visible_evidence": observation.get("visible_evidence", []),
+            "decision": event["decision"],
+            "printer_action_executed": event["printer_action_executed"],
+        }
+        result = send_home_assistant_webhook(
+            self.home_assistant_webhook_url,
+            payload,
+            timeout_seconds=10)
+        self.last_notification_monotonic = now
+        return {
+            "status": "delivered",
+            "http_status": result["status"],
+        }
+
     def step(self):
         try:
             status = self._printer_status()
@@ -262,6 +314,8 @@ class VisionMonitor:
         print_stats = status.get("print_stats", {})
         if print_stats.get("state") != "printing":
             self.observations.clear()
+            self.action_issued = False
+            self.last_notification_monotonic = None
             return {
                 "active": False,
                 "action": "none",
@@ -307,7 +361,24 @@ class VisionMonitor:
                 image, content_type, event)
             event["printer_action_executed"] = self._apply_action(
                 decision["action"])
+            try:
+                event["home_assistant_notification"] = (
+                    self._notify_home_assistant(event))
+            except Exception as exc:
+                event["home_assistant_notification"] = {
+                    "status": "failed",
+                    "error": repr(exc),
+                }
         return event
+
+
+def _load_console_config(path):
+    try:
+        with open(os.path.expanduser(path), encoding="utf-8") as handle:
+            config = json.load(handle)
+        return config if isinstance(config, dict) else {}
+    except (FileNotFoundError, OSError, ValueError):
+        return {}
 
 
 def main():
@@ -317,8 +388,12 @@ def main():
         "--moonraker-url", default="http://127.0.0.1:7125")
     parser.add_argument(
         "--printer-web-url", default="http://127.0.0.1")
-    parser.add_argument("--llm-base-url", required=True)
-    parser.add_argument("--model", required=True)
+    parser.add_argument("--llm-base-url")
+    parser.add_argument("--model")
+    parser.add_argument(
+        "--console-config",
+        default="~/.config/local-vision-console/config.json",
+        help="Reuse LLM and Home Assistant settings from the web console")
     parser.add_argument("--reaction", choices=REACTIONS, default="warn")
     parser.add_argument("--early-cancel-minutes", type=float, default=20)
     parser.add_argument(
@@ -327,6 +402,9 @@ def main():
     parser.add_argument("--consecutive-detections", type=int, default=3)
     parser.add_argument("--live-status")
     parser.add_argument("--evidence-dir")
+    parser.add_argument("--home-assistant-webhook-url")
+    parser.add_argument(
+        "--home-assistant-cooldown-minutes", type=float)
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--allow-printer-actions", action="store_true")
     parser.add_argument("--confirm-actions")
@@ -336,6 +414,23 @@ def main():
         parser.error(
             "--allow-printer-actions requires "
             "--confirm-actions %s" % ACTION_CONFIRMATION)
+    console_config = _load_console_config(args.console_config)
+    llm_base_url = args.llm_base_url or console_config.get("base_url")
+    model = args.model or console_config.get("model")
+    if not llm_base_url or not model:
+        parser.error(
+            "LLM base URL and model are required either as arguments or in "
+            "--console-config")
+    webhook_url = args.home_assistant_webhook_url
+    if webhook_url is None:
+        webhook_url = os.environ.get(
+            "LOCAL_VISION_HOME_ASSISTANT_WEBHOOK_URL")
+    if webhook_url is None and console_config.get("home_assistant_enabled"):
+        webhook_url = console_config.get("home_assistant_webhook_url", "")
+    cooldown_minutes = args.home_assistant_cooldown_minutes
+    if cooldown_minutes is None:
+        cooldown_minutes = float(console_config.get(
+            "home_assistant_cooldown_minutes", 15))
     policy = {
         "reaction": args.reaction,
         "early_cancel_minutes": args.early_cancel_minutes,
@@ -345,11 +440,15 @@ def main():
     }
     monitor = VisionMonitor(
         args.moonraker_url, args.printer_web_url,
-        args.llm_base_url, args.model, policy,
+        llm_base_url, model, policy,
         live_status_path=args.live_status,
-        api_token=os.environ.get("LOCAL_VISION_API_TOKEN"),
+        api_token=(
+            os.environ.get("LOCAL_VISION_API_TOKEN")
+            or console_config.get("api_key")),
         allow_printer_actions=args.allow_printer_actions,
-        evidence_dir=args.evidence_dir)
+        evidence_dir=args.evidence_dir,
+        home_assistant_webhook_url=webhook_url,
+        home_assistant_cooldown_seconds=cooldown_minutes * 60.0)
     while True:
         print(json.dumps(monitor.step(), indent=2, sort_keys=True))
         if args.once:

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Lokale KI · Vision Check</title>
-    <link rel="stylesheet" href="styles.css?v=4" />
+    <link rel="stylesheet" href="styles.css?v=8" />
   </head>
   <body>
     <main>
@@ -18,9 +18,9 @@
         <p class="eyebrow">Eigenständiges Werkzeug</p>
         <h1>Lokale KI verbinden und Vision wirklich prüfen.</h1>
         <p>
-          Diese Seite ist von AutoPA, Klipper und Moonraker getrennt. Sie sendet
-          keine Druckerbefehle und testet ausschließlich deinen lokalen
-          OpenAI-kompatiblen KI-Server.
+          Diese Seite ist von AutoPA getrennt. Nur die ausdrücklich bestätigte
+          Kamerakalibrierung darf über Moonraker homen und den Druckkopf
+          bewegen; alle KI-Tests bleiben ohne Druckeraktion.
         </p>
       </section>
 
@@ -119,13 +119,124 @@
           </div>
         </section>
 
+        <section class="panel calibration-panel">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Geometrie · beaufsichtigt</p>
+              <h2>Automatische Kamerakalibrierung</h2>
+            </div>
+            <span id="camera-calibration-state" class="mini-status">
+              Nicht kalibriert
+            </span>
+          </div>
+
+          <p class="analysis-intro">
+            Local Vision ermittelt automatisch, aus welcher Richtung die
+            Kamera auf das Druckbett schaut. Die Achsgrenzen werden unmittelbar
+            vor dem Start live aus Klipper gelesen. Jeder Schritt erscheint
+            zusätzlich in der Mainsail-Konsole.
+          </p>
+
+          <div class="calibration-steps" aria-label="Ablauf der Kalibrierung">
+            <article class="calibration-step">
+              <span>1</span>
+              <div>
+                <strong>Grenzen prüfen</strong>
+                <p>Druckerleerlauf, Bettgröße und sichere Fahrpunkte prüfen.</p>
+              </div>
+            </article>
+            <article class="calibration-step">
+              <span>2</span>
+              <div>
+                <strong>Normal homen</strong>
+                <p><code>G28</code> ohne Heizen oder Düsenreinigung ausführen.</p>
+              </div>
+            </article>
+            <article class="calibration-step">
+              <span>3</span>
+              <div>
+                <strong>Kamera zuordnen</strong>
+                <p>Fünf Punkte langsam anfahren und per Vision-Modell erkennen.</p>
+              </div>
+            </article>
+          </div>
+
+          <div class="calibration-actions">
+            <label class="check calibration-confirm">
+              <input id="calibration-motion-confirm" type="checkbox" />
+              Ich bin am Drucker und weiß, dass Homing und Bewegungen starten.
+            </label>
+            <button id="auto-calibrate-camera" class="primary" type="button">
+              Auto-Kalibrierung starten
+            </button>
+          </div>
+          <p id="camera-calibration-result" class="message"
+            aria-live="polite"></p>
+        </section>
+
+        <section class="panel notification-panel">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Benachrichtigung</p>
+              <h2>Home Assistant Alarm</h2>
+            </div>
+            <span id="home-assistant-state" class="mini-status">
+              Nicht eingerichtet
+            </span>
+          </div>
+
+          <p class="analysis-intro">
+            Nach mehreren bestätigten Fehlerbildern kann Local Vision einen
+            privaten Home-Assistant-Webhook auslösen. Home Assistant übernimmt
+            anschließend die Benachrichtigung am Handy. Ein einzelnes
+            unsicheres Bild löst keinen Alarm aus.
+          </p>
+
+          <div class="notification-settings">
+            <label>
+              Home-Assistant-Webhook
+              <input id="home-assistant-webhook" type="password"
+                autocomplete="new-password"
+                placeholder="http://homeassistant.local:8123/api/webhook/…" />
+              <small>
+                Die gespeicherte Webhook-ID wird nie an den Browser
+                zurückgegeben.
+              </small>
+            </label>
+            <label>
+              Alarm-Sperrzeit
+              <div class="number-field">
+                <input id="home-assistant-cooldown" type="number"
+                  min="1" max="1440" value="15" />
+                <span>Minuten</span>
+              </div>
+            </label>
+          </div>
+
+          <div class="notification-actions">
+            <label class="check">
+              <input id="home-assistant-enabled" type="checkbox" />
+              Alarm bei bestätigtem Druckfehler aktivieren
+            </label>
+            <label class="check">
+              <input id="clear-home-assistant-webhook" type="checkbox" />
+              Gespeicherten Webhook entfernen
+            </label>
+            <button id="test-home-assistant" class="secondary" type="button">
+              Testalarm senden
+            </button>
+          </div>
+          <p id="home-assistant-result" class="message"
+            aria-live="polite"></p>
+        </section>
+
         <section class="panel reference-panel">
           <div class="section-head">
             <div>
               <p class="eyebrow">Optionaler Soll-/Ist-Vergleich</p>
               <h2>Kamera gegen aktuellen G-Code</h2>
             </div>
-            <span class="mini-status">Keine Druckerbefehle</span>
+            <span class="mini-status">Kalibrierfahrt optional</span>
           </div>
 
           <p class="analysis-intro">
@@ -232,6 +343,6 @@
         </section>
       </div>
     </main>
-    <script src="app.js?v=4" defer></script>
+    <script src="app.js?v=8" defer></script>
   </body>
 </html>

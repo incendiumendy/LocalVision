@@ -26,6 +26,17 @@ const elements = {
   detectView: $("#detect-view"),
   compareGcode: $("#compare-gcode"),
   referenceResult: $("#reference-result"),
+  homeAssistantWebhook: $("#home-assistant-webhook"),
+  homeAssistantEnabled: $("#home-assistant-enabled"),
+  homeAssistantCooldown: $("#home-assistant-cooldown"),
+  clearHomeAssistantWebhook: $("#clear-home-assistant-webhook"),
+  homeAssistantState: $("#home-assistant-state"),
+  homeAssistantResult: $("#home-assistant-result"),
+  testHomeAssistant: $("#test-home-assistant"),
+  cameraCalibrationState: $("#camera-calibration-state"),
+  calibrationMotionConfirm: $("#calibration-motion-confirm"),
+  autoCalibrateCamera: $("#auto-calibrate-camera"),
+  cameraCalibrationResult: $("#camera-calibration-result"),
 };
 
 function klipperUrl() {
@@ -91,6 +102,18 @@ async function loadConfig() {
     elements.moonrakerUrl.value = config.moonrakerUrl;
     elements.camera.dataset.selected = config.cameraUid || "";
     elements.cameraView.value = config.cameraView || "unknown";
+    elements.homeAssistantEnabled.checked =
+      config.homeAssistantEnabled === true;
+    elements.homeAssistantCooldown.value =
+      config.homeAssistantCooldownMinutes || 15;
+    elements.homeAssistantState.textContent =
+      config.homeAssistantWebhookConfigured
+        ? (config.homeAssistantEnabled ? "Alarm aktiv" : "Webhook gespeichert")
+        : "Nicht eingerichtet";
+    elements.cameraCalibrationState.textContent =
+      config.cameraCalibrationConfigured
+        ? "Geometrisch kalibriert"
+        : "Nicht kalibriert";
     elements.keyState.textContent = config.apiKeyConfigured
       ? "API-Key gespeichert"
       : "Kein API-Key";
@@ -120,13 +143,25 @@ async function saveConfig(quiet = false) {
         moonrakerUrl: elements.moonrakerUrl.value,
         cameraUid: elements.camera.value,
         cameraView: elements.cameraView.value,
+        homeAssistantWebhookUrl: elements.homeAssistantWebhook.value,
+        homeAssistantEnabled: elements.homeAssistantEnabled.checked,
+        homeAssistantCooldownMinutes:
+          Number(elements.homeAssistantCooldown.value),
+        clearHomeAssistantWebhook:
+          elements.clearHomeAssistantWebhook.checked,
       }),
     });
     elements.apiKey.value = "";
     elements.clearKey.checked = false;
+    elements.homeAssistantWebhook.value = "";
+    elements.clearHomeAssistantWebhook.checked = false;
     elements.keyState.textContent = config.apiKeyConfigured
       ? "API-Key gespeichert"
       : "Kein API-Key";
+    elements.homeAssistantState.textContent =
+      config.homeAssistantWebhookConfigured
+        ? (config.homeAssistantEnabled ? "Alarm aktiv" : "Webhook gespeichert")
+        : "Nicht eingerichtet";
     if (!quiet) {
       elements.configResult.textContent = "Konfiguration sicher gespeichert.";
     }
@@ -136,6 +171,82 @@ async function saveConfig(quiet = false) {
     return false;
   } finally {
     setBusy(elements.save, false);
+  }
+}
+
+async function testHomeAssistant() {
+  setBusy(elements.testHomeAssistant, true, "Sende …");
+  elements.homeAssistantResult.textContent = "";
+  try {
+    if (!await saveConfig(true)) return;
+    const result = await request("/api/home-assistant/test", {
+      method: "POST",
+      body: "{}",
+    });
+    elements.homeAssistantResult.textContent = result.delivered
+      ? "Testalarm an Home Assistant zugestellt."
+      : "Home Assistant hat den Testalarm nicht bestätigt.";
+  } catch (error) {
+    elements.homeAssistantResult.textContent = error.message;
+  } finally {
+    setBusy(elements.testHomeAssistant, false);
+  }
+}
+
+async function autoCalibrateCamera() {
+  if (!elements.calibrationMotionConfirm.checked) {
+    elements.cameraCalibrationResult.textContent =
+      "Bitte zuerst Homing und Druckkopfbewegungen ausdrücklich bestätigen.";
+    return;
+  }
+  setBusy(elements.autoCalibrateCamera, true, "Prüfe Grenzen …");
+  elements.cameraCalibrationResult.textContent =
+    "Klipper-Zustand und Achsgrenzen werden gelesen …";
+  try {
+    if (!await saveConfig(true)) return;
+    const preview = await request("/api/camera/calibration/plan");
+    const plan = preview.plan;
+    const points = plan.points
+      .map((point) => `${point.name}: X${point.x} Y${point.y}`)
+      .join("\n");
+    const confirmed = window.confirm(
+      `Auto-Kalibrierung startet jetzt normales G28 ohne Heizen.\n\n`
+      + `Bewegungsraum: ${plan.bedWidth} × ${plan.bedDepth} mm\n`
+      + `Sicherer Z-Abstand: ${plan.safeZ} mm\n`
+      + `Messpunkte:\n${points}\n\n`
+      + "Der Drucker muss leer und beaufsichtigt sein. Jetzt starten?",
+    );
+    if (!confirmed) {
+      elements.cameraCalibrationResult.textContent =
+        "Auto-Kalibrierung wurde vor jeder Bewegung abgebrochen.";
+      return;
+    }
+    setBusy(elements.autoCalibrateCamera, true, "Home & kalibriere …");
+    const prepared = await request("/api/camera/calibration/prepare", {
+      method: "POST",
+      body: JSON.stringify({ motionConfirmation: "HOME_AND_MOVE" }),
+    });
+    elements.cameraCalibrationResult.textContent = prepared.consoleMessages
+      ? "Kalibrierung läuft. Jeder Schritt erscheint auch in der Mainsail-Konsole …"
+      : "Kalibrierung läuft. Jeder Schritt erscheint im Local-Vision-Dienstprotokoll …";
+    const result = await request("/api/camera/calibration/run", {
+      method: "POST",
+      body: JSON.stringify({
+        sessionToken: prepared.sessionToken,
+        motionConfirmation: "HOME_AND_MOVE",
+      }),
+    });
+    elements.cameraCalibrationState.textContent = "Geometrisch kalibriert";
+    elements.cameraCalibrationResult.textContent =
+      `Kalibrierung gespeichert. Kontrollabweichung: `
+      + `${(result.reprojectionError * 100).toFixed(1)} % der Bilddiagonale, `
+      + `minimale Erkennungskonfidenz: `
+      + `${Math.round(result.minimumConfidence * 100)} %.`;
+    elements.calibrationMotionConfirm.checked = false;
+  } catch (error) {
+    elements.cameraCalibrationResult.textContent = error.message;
+  } finally {
+    setBusy(elements.autoCalibrateCamera, false);
   }
 }
 
@@ -368,6 +479,8 @@ elements.analyze.addEventListener("click", analyzeDataset);
 elements.loadCameras.addEventListener("click", () => loadCameras(true));
 elements.detectView.addEventListener("click", detectView);
 elements.compareGcode.addEventListener("click", compareGcode);
+elements.testHomeAssistant.addEventListener("click", testHomeAssistant);
+elements.autoCalibrateCamera.addEventListener("click", autoCalibrateCamera);
 
 async function initialize() {
   if (await loadConfig()) {

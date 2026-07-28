@@ -1,8 +1,16 @@
 # Local Vision Console
 
 Die Local Vision Console ist ein eigenständiges Hilfswerkzeug für lokale,
-OpenAI-kompatible KI-Server. Sie läuft separat von AutoPA auf Port `7127` und
-hat keine Verbindung zu Klipper, Moonraker oder Druckeraktionen.
+OpenAI-kompatible KI-Server. Sie läuft separat von AutoPA auf Port `7127`.
+Nur die ausdrücklich bestätigte Kamerakalibrierung darf über Moonraker homen
+und langsame Messfahrten ausführen; alle Fähigkeitstests bleiben ohne
+Druckeraktion.
+
+Während einer Kalibrierung protokolliert Local Vision Homing, jeden Messpunkt,
+die Vision-Konfidenz sowie Erfolg oder Abbruch im eigenen Dienstprotokoll. Wenn
+Klipper `[respond]` geladen hat, erscheinen dieselben Meldungen zusätzlich in
+der Mainsail-Konsole. Ein Fehler bei einer reinen Konsolenmeldung beeinflusst
+die Kalibrierungslogik nicht.
 
 ## Installation
 
@@ -97,8 +105,31 @@ das konfigurierte Vision-Modell ein aktuelles Snapshot und schlägt Blickrichtun
 und Konfidenz vor. Dieser Vorschlag wird erst nach manueller Bestätigung
 gespeichert.
 
-Für eine millimetergenaue Überlagerung muss zusätzlich einmalig die Position der
-vier Druckbett-Ecken im Kamerabild markiert werden. Daraus kann eine Homographie
-berechnet werden. Bis diese Vierpunkt-Kalibrierung umgesetzt und geprüft ist,
-darf das System nur grobe Formabweichungen melden und keine Druckeraktion
-auslösen.
+Für eine geometrisch ausgerichtete Überlagerung muss zusätzlich einmalig die
+Position bekannter Bettkoordinaten im Kamerabild bestimmt werden. Die folgende
+automatische Kalibrierung berechnet daraus eine Homographie. Ohne erfolgreich
+gespeicherte Kalibrierung darf das System nur grobe Formabweichungen melden.
+
+## Automatische geometrische Kamerakalibrierung
+
+Die Webkonsole kann die Achsgrenzen live aus Klippers `toolhead`-Objekt lesen.
+Nach ausdrücklicher Bestätigung führt der Ablauf ein normales `G28` ohne
+Heizen aus. Anschließend wird ein sicherer Z-Abstand angefahren und der
+Druckkopf langsam zu vier eingerückten Eckpunkten sowie einer unabhängigen
+Kontrollposition bewegt.
+
+Zwischen zwei Kamerabildern lokalisiert das Vision-Modell den bewegten
+Druckkopf. Aus den vier bekannten XY-Punkten und den Bildkoordinaten wird eine
+Homographie berechnet. Der fünfte Punkt prüft die Projektion; bei zu großer
+Abweichung wird nichts gespeichert.
+
+Sicherheitsregeln:
+
+- nur bei Klipper-Zustand `ready` und Druckstatus `standby`, `complete` oder
+  `cancelled`;
+- Achsgrenzen werden unmittelbar vor Homing und Messfahrt erneut geprüft;
+- 20 Prozent Sicherheitsrand an X und Y, mindestens 30 mm;
+- normales `G28`, keine Heizung und kein Filamentbefehl;
+- langsame Messfahrt mit 50 mm/s und sicherem Z-Abstand;
+- keine Kalibrierung bei unsicherer Druckkopferkennung;
+- Start ausschließlich unter Aufsicht und nach UI-Bestätigung.

@@ -297,8 +297,17 @@ small, .optional {
 }
 
 .analysis-panel,
-.reference-panel {
+.reference-panel,
+.notification-panel,
+.calibration-panel {
   grid-column: 1 / -1;
+}
+
+.calibration-panel {
+  border-color: rgba(255, 184, 92, .24);
+  background:
+    linear-gradient(135deg, rgba(255, 184, 92, .045), transparent 42%),
+    rgba(16, 19, 27, .93);
 }
 
 .analysis-intro {
@@ -326,6 +335,79 @@ small, .optional {
   display: flex;
   justify-content: flex-end;
   gap: 10px;
+}
+
+.calibration-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.calibration-step {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 11px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px;
+  background: var(--panel-2);
+}
+
+.calibration-step > span {
+  display: grid;
+  place-items: center;
+  width: 27px;
+  height: 27px;
+  border: 1px solid rgba(255, 184, 92, .32);
+  border-radius: 8px;
+  color: #ffd39b;
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.calibration-step strong {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--text);
+  font-size: 11px;
+}
+
+.calibration-step p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.calibration-step code {
+  color: #ffd39b;
+}
+
+.calibration-actions {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+
+.calibration-actions button {
+  margin-left: auto;
+}
+
+.notification-settings {
+  display: grid;
+  grid-template-columns: minmax(320px, 1fr) minmax(160px, .3fr);
+  gap: 12px;
+}
+
+.notification-actions {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+
+.notification-actions button {
+  margin-left: auto;
 }
 
 .analysis-result {
@@ -359,4 +441,10 @@ small, .optional {
   .analysis-controls { grid-template-columns: 1fr; }
   .reference-settings { grid-template-columns: 1fr; }
   .reference-actions { display: grid; }
+  .calibration-steps { grid-template-columns: 1fr; }
+  .calibration-actions { display: grid; }
+  .calibration-actions button { margin-left: 0; width: 100%; }
+  .notification-settings { grid-template-columns: 1fr; }
+  .notification-actions { display: grid; }
+  .notification-actions button { margin-left: 0; }
 }
