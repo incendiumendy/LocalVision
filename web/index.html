@@ -133,8 +133,10 @@
           <p class="analysis-intro">
             Local Vision ermittelt automatisch, aus welcher Richtung die
             Kamera auf das Druckbett schaut. Die Achsgrenzen werden unmittelbar
-            vor dem Start live aus Klipper gelesen. Jeder Schritt erscheint
-            zusätzlich in der Mainsail-Konsole.
+            vor dem Start live aus Klipper gelesen. Pro Messpunkt werden drei
+            getrennte Vision-Analysen per Median zusammengeführt. Koordinaten
+            und Streuung erscheinen in der Mainsail-Konsole; Bilder und rohe
+            Antworten bleiben lokal als Diagnosedaten gespeichert.
           </p>
 
           <div class="calibration-steps" aria-label="Ablauf der Kalibrierung">
@@ -156,7 +158,10 @@
               <span>3</span>
               <div>
                 <strong>Kamera zuordnen</strong>
-                <p>Fünf Punkte langsam anfahren und per Vision-Modell erkennen.</p>
+                <p>
+                  Fünf Punkte langsam anfahren und jeweils dreimal unabhängig
+                  per Vision-Modell erkennen.
+                </p>
               </div>
             </article>
           </div>
@@ -172,6 +177,69 @@
           </div>
           <p id="camera-calibration-result" class="message"
             aria-live="polite"></p>
+        </section>
+
+        <section class="panel spaghetti-panel">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Sicherheitstest · kalt &amp; stillstehend</p>
+              <h2>Kontrollierter Spaghetti-Test</h2>
+            </div>
+            <span id="spaghetti-state" class="mini-status">
+              Bereit
+            </span>
+          </div>
+
+          <p class="analysis-intro">
+            Ein sicherer Zweibild-Test mit echtem losem Filament. Local Vision
+            nimmt zuerst bei leerem, kaltem Bett ein Referenzbild auf. Danach
+            legst du Filament-Spaghetti von Hand in den sichtbaren Bereich und
+            startest die Prüfung. Der Ablauf sendet keine Heiz-, Homing- oder
+            Bewegungsbefehle und bricht ab, sobald sich der Drucker bewegt
+            oder ein Heizungsziel gesetzt ist.
+          </p>
+
+          <div class="calibration-steps" aria-label="Ablauf des Spaghetti-Tests">
+            <article class="calibration-step">
+              <span>1</span>
+              <div>
+                <strong>Referenz aufnehmen</strong>
+                <p>Kaltes, leeres Bett und stillstehenden Drucker prüfen.</p>
+              </div>
+            </article>
+            <article class="calibration-step">
+              <span>2</span>
+              <div>
+                <strong>Filament auflegen</strong>
+                <p>Lose Filamentfäden von Hand in den Kamerabereich legen.</p>
+              </div>
+            </article>
+            <article class="calibration-step">
+              <span>3</span>
+              <div>
+                <strong>Prüfung starten</strong>
+                <p>Geänderte Bildbereiche bestimmen und per Vision bewerten.</p>
+              </div>
+            </article>
+          </div>
+
+          <div class="calibration-actions">
+            <label class="check calibration-confirm">
+              <input id="spaghetti-cold-confirm" type="checkbox" />
+              Drucker ist kalt, stillstehend und das Bett ist leer.
+            </label>
+            <button id="spaghetti-prepare" class="primary" type="button">
+              Referenz aufnehmen
+            </button>
+            <button id="spaghetti-analyze" class="primary" type="button"
+              hidden>
+              Prüfung starten
+            </button>
+            <button id="spaghetti-cancel" class="ghost" type="button" hidden>
+              Abbrechen
+            </button>
+          </div>
+          <p id="spaghetti-result" class="message" aria-live="polite"></p>
         </section>
 
         <section class="panel notification-panel">
@@ -343,6 +411,6 @@
         </section>
       </div>
     </main>
-    <script src="app.js?v=8" defer></script>
+    <script src="app.js?v=9" defer></script>
   </body>
 </html>

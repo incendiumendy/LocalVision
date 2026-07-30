@@ -37,6 +37,12 @@ const elements = {
   calibrationMotionConfirm: $("#calibration-motion-confirm"),
   autoCalibrateCamera: $("#auto-calibrate-camera"),
   cameraCalibrationResult: $("#camera-calibration-result"),
+  spaghettiState: $("#spaghetti-state"),
+  spaghettiColdConfirm: $("#spaghetti-cold-confirm"),
+  spaghettiPrepare: $("#spaghetti-prepare"),
+  spaghettiAnalyze: $("#spaghetti-analyze"),
+  spaghettiCancel: $("#spaghetti-cancel"),
+  spaghettiResult: $("#spaghetti-result"),
 };
 
 function klipperUrl() {
@@ -247,6 +253,125 @@ async function autoCalibrateCamera() {
     elements.cameraCalibrationResult.textContent = error.message;
   } finally {
     setBusy(elements.autoCalibrateCamera, false);
+  }
+}
+
+function setSpaghettiUi(phase) {
+  const waiting = phase === "awaiting_spaghetti";
+  elements.spaghettiPrepare.hidden = waiting;
+  elements.spaghettiColdConfirm.closest("label").hidden = waiting;
+  elements.spaghettiAnalyze.hidden = !waiting;
+  elements.spaghettiCancel.hidden = !waiting;
+  elements.spaghettiState.textContent = waiting
+    ? "Referenz wartet auf Filament"
+    : "Bereit";
+  if (!waiting) {
+    elements.spaghettiColdConfirm.checked = false;
+  }
+}
+
+let spaghettiSessionToken = null;
+
+async function refreshSpaghettiStatus() {
+  try {
+    const status = await request("/api/spaghetti/status");
+    if (status.state === "awaiting_spaghetti") {
+      spaghettiSessionToken = status.sessionToken;
+      setSpaghettiUi("awaiting_spaghetti");
+      elements.spaghettiResult.textContent =
+        "Referenz gespeichert. Filament-Spaghetti auf das kalte Bett legen "
+        + "und danach die Prüfung starten.";
+    } else {
+      spaghettiSessionToken = null;
+      setSpaghettiUi("idle");
+    }
+  } catch (error) {
+    elements.spaghettiResult.textContent = error.message;
+  }
+}
+
+async function prepareSpaghettiTest() {
+  if (!elements.spaghettiColdConfirm.checked) {
+    elements.spaghettiResult.textContent =
+      "Bitte zuerst ausdrücklich bestätigen, dass der Drucker kalt, "
+      + "stillstehend und das Bett leer ist.";
+    return;
+  }
+  setBusy(elements.spaghettiPrepare, true, "Prüfe Drucker …");
+  elements.spaghettiResult.textContent =
+    "Temperatur, Bewegung und Druckstatus werden live geprüft …";
+  try {
+    if (!await saveConfig(true)) return;
+    const confirmed = window.confirm(
+      "Der Spaghetti-Test nimmt jetzt ein Referenzbild des leeren, kalten "
+      + "Druckbetts auf.\n\n"
+      + "Es werden keine Heiz-, Homing- oder Bewegungsbefehle gesendet. "
+      + "Jetzt starten?",
+    );
+    if (!confirmed) {
+      elements.spaghettiResult.textContent =
+        "Spaghetti-Test wurde vor der Referenzaufnahme abgebrochen.";
+      return;
+    }
+    const prepared = await request("/api/spaghetti/prepare", {
+      method: "POST",
+      body: JSON.stringify({ confirmation: "COLD_IDLE_REFERENCE" }),
+    });
+    spaghettiSessionToken = prepared.sessionToken;
+    setSpaghettiUi("awaiting_spaghetti");
+    elements.spaghettiResult.textContent = prepared.message;
+  } catch (error) {
+    elements.spaghettiResult.textContent = error.message;
+  } finally {
+    setBusy(elements.spaghettiPrepare, false);
+  }
+}
+
+async function analyzeSpaghettiTest() {
+  if (!spaghettiSessionToken) {
+    elements.spaghettiResult.textContent =
+      "Keine vorbereitete Referenz gefunden. Bitte zuerst eine Referenz "
+      + "aufnehmen.";
+    return;
+  }
+  setBusy(elements.spaghettiAnalyze, true, "Analysiere …");
+  elements.spaghettiResult.textContent =
+    "Kälte und Stillstand werden erneut geprüft, danach bewertet das "
+    + "Vision-Modell das aktuelle Bild …";
+  try {
+    const result = await request("/api/spaghetti/analyze", {
+      method: "POST",
+      body: JSON.stringify({ sessionToken: spaghettiSessionToken }),
+    });
+    spaghettiSessionToken = null;
+    setSpaghettiUi("idle");
+    elements.spaghettiResult.textContent = result.spaghettiDetected
+      ? `Spaghetti erkannt (${Math.round(result.confidence * 100)} %). `
+        + result.description
+      : `Kein Spaghetti erkannt (${Math.round(result.confidence * 100)} %). `
+        + result.description;
+  } catch (error) {
+    elements.spaghettiResult.textContent = error.message;
+  } finally {
+    setBusy(elements.spaghettiAnalyze, false);
+  }
+}
+
+async function cancelSpaghettiTest() {
+  if (!spaghettiSessionToken) return;
+  setBusy(elements.spaghettiCancel, true, "Breche ab …");
+  try {
+    await request("/api/spaghetti/cancel", {
+      method: "POST",
+      body: JSON.stringify({ sessionToken: spaghettiSessionToken }),
+    });
+    spaghettiSessionToken = null;
+    setSpaghettiUi("idle");
+    elements.spaghettiResult.textContent = "Spaghetti-Test abgebrochen.";
+  } catch (error) {
+    elements.spaghettiResult.textContent = error.message;
+  } finally {
+    setBusy(elements.spaghettiCancel, false);
   }
 }
 
@@ -481,11 +606,15 @@ elements.detectView.addEventListener("click", detectView);
 elements.compareGcode.addEventListener("click", compareGcode);
 elements.testHomeAssistant.addEventListener("click", testHomeAssistant);
 elements.autoCalibrateCamera.addEventListener("click", autoCalibrateCamera);
+elements.spaghettiPrepare.addEventListener("click", prepareSpaghettiTest);
+elements.spaghettiAnalyze.addEventListener("click", analyzeSpaghettiTest);
+elements.spaghettiCancel.addEventListener("click", cancelSpaghettiTest);
 
 async function initialize() {
   if (await loadConfig()) {
     await Promise.all([loadDatasets(), loadCameras(false)]);
   }
+  await refreshSpaghettiStatus();
 }
 
 initialize();
