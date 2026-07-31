@@ -26,6 +26,52 @@ HTTP API. A strict JSON response is required:
 
 The model output is advisory evidence, not a direct printer command.
 
+## Home Assistant notifications
+
+The web console accepts a private Home Assistant webhook URL in this form:
+
+```text
+http://homeassistant.local:8123/api/webhook/<webhook-id>
+```
+
+The URL is stored with the other console secrets and is never returned to the
+browser. The console can send a harmless test event. During monitoring, a
+`print_failure` event is sent only after the same consecutive-frame confidence
+gate that produces a warning, pause or cancel decision. A configurable
+cooldown prevents notification floods. Notification failure is fail-open: it
+is recorded in the event but never changes printer behavior.
+
+The monitor reuses the console configuration by default:
+
+```sh
+PYTHONPATH=src python3 -m local_vision.monitor --once
+```
+
+Home Assistant receives JSON keys including `title`, `message`, `filename`,
+`failure_type`, `failure_probability`, `visible_evidence` and `decision`.
+
+Example Home Assistant automation:
+
+```yaml
+alias: Local Vision Druckalarm
+triggers:
+  - trigger: webhook
+    webhook_id: "replace-with-a-long-random-id"
+    allowed_methods:
+      - POST
+    local_only: true
+actions:
+  - action: notify.send_message
+    target:
+      entity_id: notify.your_phone
+    data:
+      title: "{{ trigger.json.title }}"
+      message: "{{ trigger.json.message }}"
+```
+
+Use the same random ID in the Local Vision URL. Keep it private because anyone
+who knows the webhook URL can trigger the automation.
+
 ## Decision pipeline
 
 1. Read Moonraker print state and elapsed print time.

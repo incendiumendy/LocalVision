@@ -19,10 +19,18 @@ getrennt und benötigt weder Wägezelle noch Beschleunigungssensor.
 - abgeschlossene AutoPA-Ergebnisse optional und nur lesend erklären lassen
 - Drucke mit konservativen Grenzwerten und mehreren aufeinanderfolgenden
   Erkennungen überwachen
+- bestätigte Druckfehler über einen privaten Home-Assistant-Webhook melden,
+  damit Home Assistant eine Handy-Benachrichtigung senden kann
 
-Die Webkonsole sendet niemals Druckerbefehle. Beim optionalen Monitor bleiben
-Druckeraktionen deaktiviert, solange nicht beide Kommandozeilen-Sperren
-ausdrücklich freigegeben wurden.
+Die Webkonsole ist mit einer Ausnahme nur lesend: Eine ausdrücklich bestätigte,
+beaufsichtigte Kamerakalibrierung darf ein normales `G28` und langsame
+Messfahrten innerhalb der live aus Klipper gelesenen Achsgrenzen ausführen.
+Beim optionalen Monitor bleiben Druckeraktionen deaktiviert, solange nicht
+beide Kommandozeilen-Sperren ausdrücklich freigegeben wurden.
+
+Die Home-Assistant-Webhook-ID wird wie ein Geheimnis gespeichert und nie an
+den Browser zurückgegeben. Ein Testalarm kann direkt in der Webkonsole
+ausgelöst werden.
 
 ## Installation unter RatOS oder gewöhnlichem Klipper
 

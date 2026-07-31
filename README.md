@@ -16,10 +16,16 @@ not require load-cell or accelerometer hardware.
 - store or estimate the camera viewpoint;
 - compare a camera snapshot with a rendered view of the current G-code layer;
 - explain completed AutoPA result files as an optional read-only integration;
-- monitor prints with conservative consecutive-detection gates.
+- monitor prints with conservative consecutive-detection gates;
+- notify Home Assistant through a private webhook after a confirmed print
+  failure, allowing Home Assistant to send a mobile notification.
 
-The web console never sends printer commands. The optional monitor keeps
-printer actions disabled unless both command-line interlocks are supplied.
+The web console is read-only except for one supervised workflow: explicitly
+confirmed camera calibration may issue normal `G28` homing and slow in-bounds
+measurement moves. The optional monitor keeps printer actions disabled unless
+both command-line interlocks are supplied.
+The Home Assistant webhook ID is stored as a secret and is never returned to
+the browser. The web console includes a dedicated test notification.
 
 ## Install on RatOS or generic Klipper
 
