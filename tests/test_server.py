@@ -28,6 +28,7 @@ from local_vision.server import (
     image_dimensions,
     locate_moved_toolhead,
     locate_toolhead_in_frame,
+    mainsail_theme,
     make_handler,
     openai_url,
     parse_gcode_layers,
@@ -492,6 +493,32 @@ class LocalVisionConsoleTests(unittest.TestCase):
             self.assertFalse(status["heaterCommands"])
             self.assertNotIn("sessionToken", status)
 
+    def test_mainsail_theme_reads_live_ratos_primary(self):
+        config = dict(DEFAULT_CONFIG)
+        with mock.patch(
+                "local_vision.server._moonraker_json",
+                return_value={"value": "#2196F3"}) as moonraker:
+            theme = mainsail_theme(config)
+        self.assertEqual("#2196F3", theme["primary"])
+        self.assertEqual("mainsail", theme["source"])
+        self.assertIn(
+            "namespace=mainsail&key=uiSettings.primary",
+            moonraker.call_args[0][1])
+        with mock.patch(
+                "local_vision.server._moonraker_json",
+                return_value={"value": None}):
+            self.assertIsNone(mainsail_theme(config)["primary"])
+        with mock.patch(
+                "local_vision.server._moonraker_json",
+                return_value={"value": "lime"}):
+            self.assertIsNone(mainsail_theme(config)["primary"])
+        with mock.patch(
+                "local_vision.server._moonraker_json",
+                side_effect=RuntimeError("offline")):
+            theme = mainsail_theme(config)
+        self.assertIsNone(theme["primary"])
+        self.assertEqual("unavailable", theme["source"])
+
     def test_spaghetti_classifier_accepts_binary_model_answer(self):
         difference = {
             "changedPixelRatio": 0.0173,
@@ -618,6 +645,11 @@ class LocalVisionConsoleTests(unittest.TestCase):
             "web",
             "app.js",
         ).read_text(encoding="utf-8")
+        styles = Path(
+            project,
+            "web",
+            "styles.css",
+        ).read_text(encoding="utf-8")
         self.assertIn("Automatisch · aktive Moonraker-Kamera", html)
         self.assertIn("← Klipper", html)
         self.assertNotIn("← AutoPA", html)
@@ -633,8 +665,8 @@ class LocalVisionConsoleTests(unittest.TestCase):
         self.assertLess(
             html.index("Automatische Kamerakalibrierung"),
             html.index("Home Assistant Alarm"))
-        self.assertIn("app.js?v=9", html)
-        self.assertIn("styles.css?v=8", html)
+        self.assertIn("app.js?v=10", html)
+        self.assertIn("styles.css?v=9", html)
         self.assertIn("in der Mainsail-Konsole", html)
         self.assertIn("Pro Messpunkt werden drei", html)
         self.assertIn("Diagnosedaten gespeichert", html)
@@ -651,6 +683,11 @@ class LocalVisionConsoleTests(unittest.TestCase):
         self.assertLess(
             html.index("Kontrollierter Spaghetti-Test"),
             html.index("Home Assistant Alarm"))
+        self.assertIn('"/api/theme"', script)
+        self.assertIn("applyThemeColor", script)
+        self.assertIn("--primary-rgb", styles)
+        self.assertIn("--primary-ink", styles)
+        self.assertIn("#99f321", styles)
 
     def test_guided_calibration_homes_without_heating_and_saves_projection(self):
         with tempfile.TemporaryDirectory() as directory:

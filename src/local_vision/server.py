@@ -447,6 +447,24 @@ def _require_cold_idle_printer(config):
     }
 
 
+def mainsail_theme(config):
+    """Read the live Mainsail/RatOS primary color from the Moonraker DB."""
+    try:
+        payload = _moonraker_json(
+            config,
+            "/server/database/item"
+            "?namespace=mainsail&key=uiSettings.primary")
+    except (ConfigurationError, RuntimeError):
+        return {"primary": None, "source": "unavailable"}
+    value = payload.get("value") if isinstance(payload, dict) else None
+    if not isinstance(value, str):
+        return {"primary": None, "source": "default"}
+    value = value.strip()
+    if not re.fullmatch(r"#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?", value):
+        return {"primary": None, "source": "default"}
+    return {"primary": value, "source": "mainsail"}
+
+
 def _web_root(moonraker_url):
     parsed = urlparse(moonraker_url)
     hostname = parsed.hostname
@@ -2867,6 +2885,9 @@ def make_handler(
                 return
             if path == "/api/spaghetti/status":
                 self._run(spaghetti_manager.status)
+                return
+            if path == "/api/theme":
+                self._run(lambda: mainsail_theme(store.load()))
                 return
             relative = path.lstrip("/") or "index.html"
             candidate = (static_root / relative).resolve()

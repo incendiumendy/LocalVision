@@ -610,9 +610,37 @@ elements.spaghettiPrepare.addEventListener("click", prepareSpaghettiTest);
 elements.spaghettiAnalyze.addEventListener("click", analyzeSpaghettiTest);
 elements.spaghettiCancel.addEventListener("click", cancelSpaghettiTest);
 
+function applyThemeColor(color) {
+  const match = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(color || "");
+  if (!match) return;
+  let hex = match[1].toLowerCase();
+  if (hex.length === 3) {
+    hex = hex.split("").map((char) => char + char).join("");
+  }
+  const red = parseInt(hex.slice(0, 2), 16);
+  const green = parseInt(hex.slice(2, 4), 16);
+  const blue = parseInt(hex.slice(4, 6), 16);
+  const root = document.documentElement.style;
+  root.setProperty("--primary", `#${hex}`);
+  root.setProperty("--primary-rgb", `${red}, ${green}, ${blue}`);
+  const luminance = (0.299 * red + 0.587 * green + 0.114 * blue) / 255;
+  root.setProperty("--primary-ink", luminance > 0.6 ? "#16210a" : "#ffffff");
+}
+
+async function loadTheme() {
+  try {
+    const theme = await request("/api/theme");
+    if (theme.primary) applyThemeColor(theme.primary);
+  } catch (error) {
+    // Ohne Moonraker-Antwort bleibt die RatOS-Standardfarbe #99f321 aktiv.
+  }
+}
+
 async function initialize() {
   if (await loadConfig()) {
-    await Promise.all([loadDatasets(), loadCameras(false)]);
+    await Promise.all([loadDatasets(), loadCameras(false), loadTheme()]);
+  } else {
+    await loadTheme();
   }
   await refreshSpaghettiStatus();
 }
